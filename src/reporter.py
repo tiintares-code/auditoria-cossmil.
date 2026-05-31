@@ -1,6 +1,6 @@
 """
 Módulo de Reportes - Sistema de Cotejamiento 2026.
-Exporta los resultados de la conciliación desde SQLite a un archivo Excel profesional.
+Exporta los resultados a un Excel Corporativo con diseño, filtros y formato condicional.
 """
 
 import logging
@@ -12,15 +12,16 @@ from src.config import OUTPUT_DIR
 logger = logging.getLogger("SistemaActivos")
 
 def generar_reporte_excel() -> bool:
-    """Genera un reporte Excel final con múltiples hojas según el estado de conciliación."""
-    logger.info("Iniciando generación de reporte final en Excel...")
+    """Genera un reporte Excel final profesional con formato y colores."""
+    logger.info("Iniciando generación de reporte final en Excel (Estilo Corporativo)...")
     
     fecha_actual = datetime.now().strftime("%Y%m%d_%H%M")
-    nombre_archivo = f"Auditoria_Activos_{fecha_actual}.xlsx"
+    nombre_archivo = f"Auditoria_COSSMIL_{fecha_actual}.xlsx"
     ruta_salida = OUTPUT_DIR / nombre_archivo
     
     try:
         with get_connection() as conn:
+            # Consulta SQL para extraer los datos
             query = """
                 SELECT 
                     c.codigo_activo AS 'Código Evaluado',
@@ -31,42 +32,82 @@ def generar_reporte_excel() -> bool:
                     m.metadata_adicional AS 'Ubicación / Regional'
                 FROM conciliacion_resultados c
                 LEFT JOIN maestro_activos m ON c.codigo_activo = m.codigo_activo
-                ORDER BY c.estado_conciliacion ASC
+                ORDER BY 
+                    CASE c.estado_conciliacion 
+                        WHEN 'FALTANTE_EN_ACTA' THEN 1
+                        WHEN 'POSIBLE_ERROR_OCR' THEN 2
+                        WHEN 'SOBRANTE_EN_ACTA' THEN 3
+                        WHEN 'MATCH_PERFECTO' THEN 4
+                        ELSE 5
+                    END ASC
             """
             df_resultados = pd.read_sql_query(query, conn)
             
             if df_resultados.empty:
-                logger.warning("No hay resultados de conciliación para exportar.")
+                logger.warning("No hay resultados para exportar.")
                 return False
 
-            # Separar los DataFrames para las pestañas
+            # Separar DataFrames para cada pestaña
             df_perfectos = df_resultados[df_resultados['Estado de Auditoría'] == 'MATCH_PERFECTO']
             df_faltantes = df_resultados[df_resultados['Estado de Auditoría'] == 'FALTANTE_EN_ACTA']
             df_errores_ocr = df_resultados[df_resultados['Estado de Auditoría'] == 'POSIBLE_ERROR_OCR']
             df_sobrantes = df_resultados[df_resultados['Estado de Auditoría'] == 'SOBRANTE_EN_ACTA']
             
-            with pd.ExcelWriter(ruta_salida, engine='openpyxl') as writer:
-                # Hoja 1: Todo mezclado
-                df_resultados.to_excel(writer, sheet_name='Consolidado General', index=False)
+            # Crear el archivo Excel utilizando el motor avanzado xlsxwriter
+            with pd.ExcelWriter(ruta_salida, engine='xlsxwriter') as writer:
+                workbook = writer.book
                 
-                # Hoja 2: Los que hicieron Match
-                if not df_perfectos.empty:
-                    df_perfectos.to_excel(writer, sheet_name='✔ Encontrados', index=False)
+                # --- 1. DEFINICIÓN DE FORMATOS Y COLORES ---
+                formato_encabezado = workbook.add_format({
+                    'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center',
+                    'bg_color': '#002060', 'font_color': 'white', 'border': 1
+                })
+                
+                # Colores para el formato condicional
+                formato_verde = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
+                formato_rojo = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+                formato_amarillo = workbook.add_format({'bg_color': '#FFEB9C', 'font_color': '#9C6500'})
+                formato_azul = workbook.add_format({'bg_color': '#B4C6E7', 'font_color': '#003366'})
+                
+                hojas = {
+                    'Consolidado General': df_resultados,
+                    '❓ Faltantes': df_faltantes,
+                    '⚠️ Errores OCR': df_errores_ocr,
+                    '❌ Sobrantes': df_sobrantes,
+                    '✔ Encontrados': df_perfectos
+                }
+                
+                # --- 2. APLICACIÓN DE DISEÑO A CADA HOJA ---
+                for nombre_hoja, df in hojas.items():
+                    if df.empty and nombre_hoja != 'Consolidado General':
+                        continue
+                        
+                    df.to_excel(writer, sheet_name=nombre_hoja, index=False)
+                    worksheet = writer.sheets[nombre_hoja]
                     
-                # Hoja 3: LA MÁS IMPORTANTE PARA AUDITORÍA (Los que faltan)
-                if not df_faltantes.empty:
-                    # Ordenamos para mejor lectura
-                    df_faltantes.to_excel(writer, sheet_name='❓ Faltantes', index=False)
+                    # Dar formato a los encabezados y habilitar Auto-Filtros
+                    for col_num, value in enumerate(df.columns.values):
+                        worksheet.write(0, col_num, value, formato_encabezado)
+                    worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
                     
-                # Hoja 4 y 5: Irregularidades
-                if not df_errores_ocr.empty:
-                    df_errores_ocr.to_excel(writer, sheet_name='⚠️ Errores OCR', index=False)
-                if not df_sobrantes.empty:
-                    df_sobrantes.to_excel(writer, sheet_name='❌ Sobrantes', index=False)
+                    # Ajustar el ancho de las columnas para una lectura cómoda
+                    worksheet.set_column('A:A', 18)  # Código
+                    worksheet.set_column('B:B', 22)  # Estado
+                    worksheet.set_column('C:C', 55)  # Observaciones (Origen)
+                    worksheet.set_column('D:D', 45)  # Descripción
+                    worksheet.set_column('E:E', 20)  # Estado físico
+                    worksheet.set_column('F:F', 25)  # Ubicación
                     
-        logger.info(f"Reporte generado exitosamente en: {ruta_salida}")
+                    # Aplicar Formato Condicional Automático a la columna de "Estado"
+                    rango_estados = f'B2:B{len(df)+1}'
+                    worksheet.conditional_format(rango_estados, {'type': 'cell', 'criteria': '==', 'value': '"MATCH_PERFECTO"', 'format': formato_verde})
+                    worksheet.conditional_format(rango_estados, {'type': 'cell', 'criteria': '==', 'value': '"FALTANTE_EN_ACTA"', 'format': formato_rojo})
+                    worksheet.conditional_format(rango_estados, {'type': 'cell', 'criteria': '==', 'value': '"POSIBLE_ERROR_OCR"', 'format': formato_amarillo})
+                    worksheet.conditional_format(rango_estados, {'type': 'cell', 'criteria': '==', 'value': '"SOBRANTE_EN_ACTA"', 'format': formato_azul})
+                    
+        logger.info(f"Reporte corporativo generado exitosamente en: {ruta_salida}")
         return True
         
     except Exception as e:
-        logger.error(f"Error crítico al generar el reporte Excel: {str(e)}", exc_info=True)
+        logger.error(f"Error crítico al generar el Excel corporativo: {str(e)}", exc_info=True)
         return False
