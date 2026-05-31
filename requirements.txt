@@ -3,3 +3,4 @@ pandas
 PyMuPDF
 rapidfuzz
 openpyxl
+xlsxwriter
